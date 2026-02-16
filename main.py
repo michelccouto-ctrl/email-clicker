@@ -1,156 +1,61 @@
 import asyncio
-from aiosmtpd.controller import Controller
+import json
 import re
 import requests
-from datetime import datetime
-import json
-import os
+from aiosmtpd.controller import Controller
+from aiohttp import web
 
-HOST = os.getenv("SMTP_HOST", "0.0.0.0")
-PORT = int(os.getenv("SMTP_PORT", "25"))
-MAX_LINKS = int(os.getenv("MAX_LINKS", "3"))
-TIMEOUT_SECONDS = int(os.getenv("HTTP_TIMEOUT", "15"))
+# Banco de dados temporário em memória
+db = {}
 
-LOG_FILE = os.getenv("LOG_FILE", "email_clicks.log")
-CONFIRMATIONS_FILE = os.getenv("CONFIRMATIONS_FILE", "confirmations.json")
-
-class ClickBotHandler:
-    def log(self, message: str):
-        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        line = f"[{ts}] {message}"
-        print(line, flush=True)
-        try:
-            with open(LOG_FILE, "a", encoding="utf-8") as f:
-                f.write(line + "\n")
-        except Exception:
-            pass
-
-    def save_confirmation(self, data: dict):
-        confirmations = []
-        if os.path.exists(CONFIRMATIONS_FILE):
-            try:
-                with open(CONFIRMATIONS_FILE, "r", encoding="utf-8") as f:
-                    confirmations = json.load(f)
-            except Exception:
-                confirmations = []
-
-        confirmations.append(data)
-        try:
-            with open(CONFIRMATIONS_FILE, "w", encoding="utf-8") as f:
-                json.dump(confirmations, f, indent=2, ensure_ascii=False)
-        except Exception:
-            pass
-
+class EmailHandler:
     async def handle_DATA(self, server, session, envelope):
-        recipient = envelope.rcpt_tos[0] if envelope.rcpt_tos else "desconhecido"
-        sender = envelope.mail_from or "desconhecido"
+        content = envelope.content.decode('utf-8', errors='replace')
+        recipient = envelope.rcpt_tos[0].lower()
+        
+        # Busca links no corpo do e-mail
+        links = re.findall(r'https?://[^\s<>"]+|www\.[^\s<>"]+', content)
+        
+        found_link = None
+        for link in links:
+            # Filtra links que parecem ser de confirmação
+            if any(word in link.lower() for word in ["confirm", "verify", "activate", "validate"]):
+                found_link = link
+                try:
+                    # O ROBÔ CLICA NO LINK AQUI
+                    requests.get(link, timeout=10)
+                    db[recipient] = {"status": "confirmed", "link": link}
+                    print(f"✅ CONFIRMADO: {recipient}")
+                except:
+                    db[recipient] = {"status": "error", "link": link}
+                break
+        
+        return '250 OK'
 
-        self.log("📩 E-mail recebido")
-        self.log(f"   De: {sender}")
-        self.log(f"   Para: {recipient}")
+# API para o Lovable consultar
+async def check_status(request):
+    email = request.match_info['email'].lower()
+    data = db.get(email, {"status": "pending"})
+    return web.json_response(data, headers={
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Methods": "GET, OPTIONS",
+        "Access-Control-Allow-Headers": "Content-Type"
+    })
 
-        try:
-            content = envelope.content.decode("utf-8", errors="replace")
-        except Exception:
-            content = str(envelope.content)
-
-        patterns = [
-            r'https?://[^\s<>"]+(?:confirm|verify|accept|join|token|activate|invitation)[^\s<>"]*',
-            r'https?://[^\s<>"]+[?&]token=[^\s<>"]+',
-            r'https?://[^\s<>"]+[?&]code=[^\s<>"]+',
-        ]
-
-        links = []
-        for p in patterns:
-            links.extend(re.findall(p, content, flags=re.IGNORECASE))
-        links = list(dict.fromkeys(links))  # dedupe mantendo ordem
-
-        if not links:
-            self.log("   ❓ Nenhum link de confirmação encontrado")
-            self.log("   " + "=" * 60)
-            return "250 Message accepted for delivery"
-
-        self.log(f"   🔗 {len(links)} link(s) encontrado(s)")
-
-        headers = {
-            "User-Agent": os.getenv(
-                "USER_AGENT",
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            ),
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7",
-        }
-
-        for link in links[:MAX_LINKS]:
-            self.log(f"   Clicando em: {link[:120]}")
-
-            try:
-                resp = requests.get(
-                    link,
-                    headers=headers,
-                    timeout=TIMEOUT_SECONDS,
-                    allow_redirects=True,
-                )
-                self.log(f"   ↪ Status: {resp.status_code}")
-
-                self.save_confirmation(
-                    {
-                        "timestamp": datetime.now().isoformat(),
-                        "email": recipient,
-                        "sender": sender,
-                        "link": link,
-                        "status": resp.status_code,
-                    }
-                )
-
-            except requests.exceptions.Timeout:
-                self.log("   ⏱️ Timeout ao acessar o link")
-                self.save_confirmation(
-                    {
-                        "timestamp": datetime.now().isoformat(),
-                        "email": recipient,
-                        "sender": sender,
-                        "link": link,
-                        "status": "timeout",
-                    }
-                )
-            except Exception as e:
-                self.log(f"   ❌ Erro ao acessar link: {str(e)[:200]}")
-                self.save_confirmation(
-                    {
-                        "timestamp": datetime.now().isoformat(),
-                        "email": recipient,
-                        "sender": sender,
-                        "link": link,
-                        "status": "error",
-                        "error": str(e)[:200],
-                    }
-                )
-
-            await asyncio.sleep(1)
-
-        self.log("   " + "=" * 60)
-        return "250 Message accepted for delivery"
-
-
-def main():
-    print("=" * 60)
-    print("🤖 SMTP Auto-Click Bot")
-    print("=" * 60)
-    print(f"Host: {HOST}")
-    print(f"Port: {PORT}")
-    print(f"Log file: {LOG_FILE}")
-    print(f"Confirmations file: {CONFIRMATIONS_FILE}")
-    print("=" * 60, flush=True)
-
-    controller = Controller(ClickBotHandler(), hostname=HOST, port=PORT)
+async def main():
+    # Inicia SMTP na porta 25
+    controller = Controller(EmailHandler(), hostname='0.0.0.0', port=25)
     controller.start()
+    
+    # Inicia API na porta 5000
+    app = web.Application()
+    app.router.add_get('/check/{email}', check_status)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    await web.TCPSite(runner, '0.0.0.0', 5000).start()
+    
+    print("🚀 Servidor Duplo Rodando: SMTP(25) e API(5000)")
+    await asyncio.Event().wait()
 
-    try:
-        asyncio.get_event_loop().run_forever()
-    except KeyboardInterrupt:
-        controller.stop()
-
-
-if __name__ == "__main__":
-    main()
+if __name__ == '__main__':
+    asyncio.run(main())
