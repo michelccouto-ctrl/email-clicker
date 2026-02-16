@@ -1,66 +1,47 @@
 import asyncio
-import re
 import os
 from aiosmtpd.controller import Controller
 from aiohttp import web
 
-# Banco de dados simples em memória
+# Banco de dados em memória
 db = {}
 
 class EmailHandler:
     async def handle_DATA(self, server, session, envelope):
-        content = envelope.content.decode('utf-8', errors='replace')
-        recipient = envelope.rcpt_tos[0].lower()
-        print(f"📩 Recebido para: {recipient}", flush=True)
-        
-        # Busca links de confirmação
-        links = re.findall(r'https?://[^\s<>"]+|www\.[^\s<>"]+', content)
-        for link in links:
-            if any(word in link.lower() for word in ["confirm", "verify", "invite", "activate"]):
-                db[recipient] = {"status": "confirmed", "link": link}
-                print(f"✅ Link capturado para {recipient}: {link}", flush=True)
-                
-                # Tenta clicar no link via simples requisição HTTP primeiro (muitos sites aceitam)
-                try:
-                    import requests
-                    requests.get(link, timeout=10)
-                    print(f"🖱️ Clique HTTP realizado em: {link}", flush=True)
-                except:
-                    pass
-                break
+        print(f"📩 E-mail recebido!", flush=True)
         return '250 OK'
 
-async def check_status(request):
-    email = request.match_info['email'].lower()
-    return web.json_response(db.get(email, {"status": "pending"}), headers={"Access-Control-Allow-Origin": "*"})
-
-async def list_all(request):
-    return web.json_response(db, headers={"Access-Control-Allow-Origin": "*"})
-
 async def main():
-    # Porta da API (Easypanel usa 5000 internamente para mapear 8080)
-    port = int(os.environ.get("PORT", 5000))
-    
-    # Inicia SMTP na porta 25
-    controller = Controller(EmailHandler(), hostname='0.0.0.0', port=25)
-    controller.start()
-    print("✅ Servidor SMTP ativo na porta 25", flush=True)
-    
-    # Inicia API HTTP
+    # 1. Configuração de Portas
+    # Usamos 1025 para o SMTP (evita erro de permissão)
+    # Usamos 5000 para a API (padrão do Easypanel)
+    smtp_port = 1025
+    api_port = int(os.environ.get("PORT", 5000))
+
+    print(f"Starting services...", flush=True)
+
+    # 2. Inicia SMTP
+    try:
+        handler = EmailHandler()
+        controller = Controller(handler, hostname='0.0.0.0', port=smtp_port)
+        controller.start()
+        print(f"✅ SMTP rodando na porta {smtp_port}", flush=True)
+    except Exception as e:
+        print(f"❌ Erro ao iniciar SMTP: {e}", flush=True)
+
+    # 3. Inicia API HTTP
     app = web.Application()
     app.router.add_get('/', lambda r: web.Response(text="Servidor Online"))
-    app.router.add_get('/check/{email}', check_status)
-    app.router.add_get('/list', list_all)
     
     runner = web.AppRunner(app)
     await runner.setup()
-    await web.TCPSite(runner, '0.0.0.0', port).start()
-    print(f"🚀 API ativa na porta {port}", flush=True)
-    
-    await asyncio.Event().wait()
+    site = web.TCPSite(runner, '0.0.0.0', api_port)
+    await site.start()
+    print(f"🚀 API rodando na porta {api_port}", flush=True)
+
+    # Mantém o loop vivo
+    while True:
+        await asyncio.sleep(3600)
 
 if __name__ == '__main__':
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        pass
+    asyncio.run(main())
