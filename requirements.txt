@@ -1,3 +1,4 @@
 aiosmtpd
 requests
 aiohttp
+playwright
