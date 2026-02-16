@@ -1,4 +1,4 @@
 aiosmtpd
 requests
 aiohttp
-playwright
+
